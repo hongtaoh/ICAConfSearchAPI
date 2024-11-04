@@ -20,7 +20,7 @@ uri = os.getenv("MONGODB_URI")
 try:
     client = MongoClient(uri, server_api=ServerApi('1'))
     db = client.ica_conf
-    papers_collection = db['papers']
+    # papers_collection = db['papers']
 except Exception as e:
     print("Error connecting to MongoDB:", e)
     raise 
@@ -99,10 +99,12 @@ async def search_papers(query: str, k: int = 5):
         
         # Retrieve the top k paper IDs from MongoDB
         top_k_paper_ids = [list(paper_embeddings.keys())[i] for i in indices[0]]
+
+        return top_k_paper_ids
         
-        # Fetch paper details from MongoDB
-        papers = list(papers_collection.find({"paper_id": {"$in": top_k_paper_ids}}, {"_id": 0}))
-        return papers
+        # # Fetch paper details from MongoDB
+        # papers = list(papers_collection.find({"paper_id": {"$in": top_k_paper_ids}}, {"_id": 0}))
+        # return papers
 
     except Exception as e:
         print(f"Error during search: {e}")
