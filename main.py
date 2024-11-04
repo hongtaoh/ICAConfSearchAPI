@@ -2,45 +2,42 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, Path, HTTPException
-import logging
-from typing import List, Optional
 import os
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import random 
-import json 
-
+import pickle
 import numpy as np
-import gridfs
 from sentence_transformers import SentenceTransformer
 import faiss
+from sklearn.preprocessing import normalize
 
 load_dotenv()
 uri = os.getenv("MONGODB_URI")
 try:
     client = MongoClient(uri, server_api=ServerApi('1'))
     db = client.ica_conf
-    # papers_collection = db['papers']
+    papers_collection = db['papers']
+    embeddings_collection = db['embeddings']
 except Exception as e:
     print("Error connecting to MongoDB:", e)
     raise 
 
-fs = gridfs.GridFS(db, collection="paper_embeddings_fs")
-
-# Load the embeddings from GridFS
+# Load the embeddings directly from MongoDB
 print("Loading embeddings from MongoDB...")
-file_id = fs.find_one({"filename": "paper_embeddings.json"})._id 
-paper_embeddings_data = fs.get(file_id).read().decode("utf-8")  # Load and decode to string
-paper_embeddings = json.loads(paper_embeddings_data)  # Convert JSON string to dictionary
-print("Loding embeddings finished!")
+embedding_docs = list(embeddings_collection.find({}, {"_id": 0, "paper_id": 1, "embedding": 1}))
+paper_embeddings = {doc["paper_id"]: doc["embedding"] for doc in embedding_docs}
+print("Loading embeddings finished!")
 
 # Convert embeddings to NumPy array for FAISS
 embeddings = np.array(list(paper_embeddings.values()), dtype=np.float32)
 dimension = embeddings.shape[1]
 index = faiss.IndexFlatL2(dimension)
 index.add(embeddings)
+
 # Load the SentenceTransformer model
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
+with open("pca_model.pkl", "rb") as f:
+    pca = pickle.load(f)
 
 app = FastAPI()
 
@@ -57,35 +54,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define a response model for type-checking and documentation
-class Authorship(BaseModel):
-    position: Optional[int] = None
-    author_name: Optional[str] = None
-    author_affiliation: Optional[str] = None
-
-class SessionInfo(BaseModel):
-    session: str
-    session_type: Optional[str] = None
-    chair_name: Optional[str] = None
-    chair_affiliation: Optional[str] = None
-    division: Optional[str] = None
-    years: List[int] = []
-    paper_count: Optional[int] = None
-    session_id: Optional[str] = None
-
-class Paper(BaseModel):
-    paper_id: str
-    title: str
-    paper_type: str
-    abstract: Optional[str] = None
-    number_of_authors: int
-    year: int
-    session: Optional[str] = None
-    division: Optional[str] = None
-    authorships: Optional[List[Authorship]] = None
-    author_names: Optional[List[str]] = None
-    session_info: Optional[SessionInfo] = None 
-
 @app.get("/")
 async def root():
     return {"message": "Welcome to ICA Conf Data Search"}
@@ -94,19 +62,18 @@ async def root():
 async def search_papers(query: str, k: int = 5):
     try:
         # Encode the query and search for similar embeddings
-        query_embedding = model.encode(query)
+        query_embedding = model.encode(query).reshape(1, -1)
+        query_embedding = pca.transform(query_embedding) 
+        query_embedding = normalize(query_embedding, norm='l2')
         distances, indices = index.search(query_embedding.reshape(1, -1), k)
         
         # Retrieve the top k paper IDs from MongoDB
         top_k_paper_ids = [list(paper_embeddings.keys())[i] for i in indices[0]]
-
-        return top_k_paper_ids
         
-        # # Fetch paper details from MongoDB
-        # papers = list(papers_collection.find({"paper_id": {"$in": top_k_paper_ids}}, {"_id": 0}))
-        # return papers
+        # Fetch paper details from MongoDB
+        papers = list(papers_collection.find({"paper_id": {"$in": top_k_paper_ids}}, {"_id": 0}))
+        return papers
 
     except Exception as e:
         print(f"Error during search: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-
